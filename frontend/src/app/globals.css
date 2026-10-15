@@ -1,0 +1,296 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --app-bg: #f1f6fa;
+  --app-surface: #ffffff;
+  --app-card: #ffffff;
+  --app-raised: #eaf1f6;
+  --app-text: #122b40;
+  --app-muted: #60778a;
+  --app-line: #d5e1ea;
+  --app-brand: #043b6b;
+  --app-brand-hover: #07538d;
+  --app-accent: #126da2;
+  --app-cyan: #158b9b;
+  --app-gold: #946a22;
+  --app-positive: #08734f;
+  --app-warning: #956814;
+  --app-danger: #b32636;
+  --app-shadow: 0 8px 24px rgb(4 59 107 / 8%);
+}
+
+@theme inline {
+  --color-background: var(--app-bg);
+  --color-foreground: var(--app-text);
+  --color-app-bg: var(--app-bg);
+  --color-app-surface: var(--app-surface);
+  --color-app-card: var(--app-card);
+  --color-app-raised: var(--app-raised);
+  --color-app-text: var(--app-text);
+  --color-app-muted: var(--app-muted);
+  --color-app-line: var(--app-line);
+  --color-app-brand: var(--app-brand);
+  --color-app-accent: var(--app-accent);
+  --color-app-cyan: var(--app-cyan);
+  --color-app-gold: var(--app-gold);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --app-bg: #071521;
+    --app-surface: #0a1b2a;
+    --app-card: #102638;
+    --app-raised: #173248;
+    --app-text: #edf5fb;
+    --app-muted: #a1b2c0;
+    --app-line: #294256;
+    --app-brand: #043b6b;
+    --app-brand-hover: #0a4e82;
+    --app-accent: #67c4f2;
+    --app-cyan: #5bd1d4;
+    --app-gold: #d6b66e;
+    --app-positive: #74d6ae;
+    --app-warning: #e7c36e;
+    --app-danger: #ff929a;
+    --app-shadow: 0 12px 28px rgb(0 0 0 / 24%);
+  }
+}
+
+html {
+  min-height: 100%;
+  background: var(--app-bg);
+}
+
+body {
+  min-height: 100vh;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-family: "Avenir Next", Avenir, "Trebuchet MS", system-ui, sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 3px solid var(--app-cyan);
+  outline-offset: 2px;
+}
+
+.app-shell {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+  min-height: 100vh;
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.app-card {
+  border: 1px solid var(--app-line);
+  border-radius: 14px;
+  background: var(--app-card);
+  box-shadow: var(--app-shadow);
+}
+
+.app-panel {
+  border: 1px solid var(--app-line);
+  border-radius: 12px;
+  background: var(--app-surface);
+}
+
+.app-input {
+  min-height: 46px;
+  width: 100%;
+  border: 1px solid var(--app-line);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  padding: 0.65rem 0.8rem;
+}
+
+.app-input::placeholder {
+  color: var(--app-muted);
+  opacity: 0.8;
+}
+
+.app-topbar {
+  margin: 0 -1rem;
+  border-bottom: 1px solid rgb(255 255 255 / 12%);
+  background: var(--app-brand);
+  color: #fff;
+  padding: 1rem;
+}
+
+.app-tabbar {
+  position: fixed;
+  z-index: 40;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.25rem;
+  border-top: 1px solid var(--app-line);
+  background: color-mix(in srgb, var(--app-surface) 94%, transparent);
+  padding: 0.35rem 0.4rem max(0.45rem, env(safe-area-inset-bottom));
+  backdrop-filter: blur(16px);
+}
+
+.app-tabbar button {
+  display: flex;
+  min-height: 52px;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  border-radius: 10px;
+  color: var(--app-muted);
+  font-size: 0.68rem;
+  line-height: 1;
+}
+
+.app-tabbar button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--app-brand) 12%, var(--app-surface));
+  color: var(--app-accent);
+}
+
+.app-shell.bg-zinc-950,
+.app-shell {
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.app-shell .bg-zinc-950,
+.app-shell .bg-zinc-900,
+.app-shell [class~="bg-zinc-900/80"],
+.app-shell [class~="bg-zinc-900/70"],
+.app-shell [class~="bg-zinc-900/60"],
+.app-shell [class~="bg-zinc-900/50"] {
+  background-color: var(--app-card);
+}
+
+.app-shell .bg-zinc-800 {
+  background-color: var(--app-raised);
+}
+
+.app-shell .border-zinc-800,
+.app-shell [class~="border-zinc-800/80"],
+.app-shell [class~="border-zinc-800/50"],
+.app-shell .border-zinc-700 {
+  border-color: var(--app-line);
+}
+
+.app-shell .text-zinc-100,
+.app-shell .text-zinc-200,
+.app-shell .text-zinc-300 {
+  color: var(--app-text);
+}
+
+.app-shell .text-zinc-400,
+.app-shell .text-zinc-500 {
+  color: var(--app-muted);
+}
+
+.app-shell .bg-blue-600 {
+  background-color: var(--app-brand);
+}
+
+.app-shell .bg-blue-500 {
+  background-color: var(--app-accent);
+}
+
+.app-shell .bg-blue-950 {
+  background-color: color-mix(in srgb, var(--app-brand) 12%, var(--app-surface));
+}
+
+.app-shell .text-blue-400,
+.app-shell .text-blue-300 {
+  color: var(--app-accent);
+}
+
+.app-shell .border-blue-800 {
+  border-color: color-mix(in srgb, var(--app-brand) 45%, var(--app-line));
+}
+
+.app-shell .bg-emerald-950 {
+  background-color: color-mix(in srgb, var(--app-positive) 12%, var(--app-surface));
+}
+
+.app-shell .text-emerald-300,
+.app-shell .text-emerald-400 {
+  color: var(--app-positive);
+}
+
+.app-shell .border-emerald-800 {
+  border-color: color-mix(in srgb, var(--app-positive) 40%, var(--app-line));
+}
+
+.app-shell .text-amber-400 {
+  color: var(--app-gold);
+}
+
+.app-shell .bg-amber-950 {
+  background-color: color-mix(in srgb, var(--app-warning) 12%, var(--app-surface));
+}
+
+.app-shell .text-red-400 {
+  color: var(--app-danger);
+}
+
+.app-shell .text-red-700 {
+  color: var(--app-danger);
+}
+
+.app-shell .text-purple-400 {
+  color: #6843a6;
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-shell .text-purple-400 {
+    color: #d0aaff;
+  }
+}
+
+@media (min-width: 640px) {
+  .app-topbar {
+    margin: 0 -2rem;
+    padding: 1.25rem 2rem;
+  }
+
+  .app-tabbar {
+    position: static;
+    display: flex;
+    justify-content: flex-start;
+    gap: 0.4rem;
+    border: 0;
+    border-bottom: 1px solid var(--app-line);
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+    backdrop-filter: none;
+  }
+
+  .app-tabbar button {
+    min-width: 112px;
+    min-height: 48px;
+    flex-direction: row;
+    border-radius: 8px 8px 0 0;
+    font-size: 0.875rem;
+  }
+}
