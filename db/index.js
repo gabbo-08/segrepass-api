@@ -1,88 +1,251 @@
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const Database = require('better-sqlite3');
+const { db: defaultDb } = require('./index');
 
-const SCHEMA_VERSION = 1;
-const DEFAULT_DATABASE_PATH = path.join(os.homedir(), '.segrepass-api', 'segrepass.sqlite3');
-
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS StudentProfile (
-    id TEXT PRIMARY KEY,
-    course_id TEXT,
-    course_name TEXT,
-    cohort_year INTEGER CHECK (cohort_year IS NULL OR cohort_year BETWEEN 1900 AND 2200),
-    current_course_year INTEGER CHECK (current_course_year IS NULL OR current_course_year BETWEEN 1 AND 20),
-    channel TEXT,
-    surname_initial TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS StudyPlans (
-    id INTEGER PRIMARY KEY,
-    course_id TEXT NOT NULL,
-    cohort_year INTEGER NOT NULL CHECK (cohort_year BETWEEN 1900 AND 2200),
-    course_name TEXT NOT NULL,
-    version TEXT NOT NULL DEFAULT '1',
-    source_name TEXT,
-    source_url TEXT,
-    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (course_id, cohort_year, version)
-  );
-
-  CREATE TABLE IF NOT EXISTS PlanCourses (
-    id INTEGER PRIMARY KEY,
-    plan_id INTEGER NOT NULL REFERENCES StudyPlans(id) ON DELETE CASCADE,
-    course_code TEXT,
-    course_name TEXT NOT NULL,
-    normalized_name TEXT NOT NULL,
-    cfu REAL NOT NULL CHECK (cfu >= 0),
-    study_year INTEGER CHECK (study_year IS NULL OR study_year BETWEEN 1 AND 20),
-    semester INTEGER CHECK (semester IS NULL OR semester IN (1, 2)),
-    course_type TEXT NOT NULL DEFAULT 'mandatory'
-      CHECK (course_type IN ('mandatory', 'elective', 'other')),
-    elective_group TEXT,
-    elective_required_cfu REAL CHECK (elective_required_cfu IS NULL OR elective_required_cfu >= 0),
-    prerequisites_json TEXT NOT NULL DEFAULT '[]',
-    UNIQUE (plan_id, course_code)
-  );
-
-  CREATE TABLE IF NOT EXISTS SelectedElectives (
-    profile_id TEXT NOT NULL REFERENCES StudentProfile(id) ON DELETE CASCADE,
-    plan_course_id INTEGER NOT NULL REFERENCES PlanCourses(id) ON DELETE CASCADE,
-    selected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (profile_id, plan_course_id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_study_plans_course_cohort
-    ON StudyPlans(course_id, cohort_year, imported_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_plan_courses_plan_year_semester
-    ON PlanCourses(plan_id, study_year, semester);
-  CREATE INDEX IF NOT EXISTS idx_selected_electives_profile
-    ON SelectedElectives(profile_id);
-`;
-
-function createDatabase(filename = process.env.SEGREPASS_DB_PATH || DEFAULT_DATABASE_PATH) {
-  if (filename !== ':memory:') {
-    fs.mkdirSync(path.dirname(path.resolve(filename)), { recursive: true });
-  }
-
-  const db = new Database(filename);
-  db.pragma('foreign_keys = ON');
-
-  const currentVersion = db.pragma('user_version', { simple: true });
-  if (currentVersion > SCHEMA_VERSION) {
-    db.close();
-    throw new Error(`Database schema ${currentVersion} is newer than supported schema ${SCHEMA_VERSION}.`);
-  }
-
-  db.exec(SCHEMA);
-  db.pragma(`user_version = ${SCHEMA_VERSION}`);
-  if (filename !== ':memory:') db.pragma('journal_mode = WAL');
-  return db;
+function normalizeName(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
-const db = createDatabase();
+function parsePlanCourse(row) {
+  if (!row) return null;
+  let prerequisites = [];
+  try {
+    prerequisites = JSON.parse(row.prerequisites_json || '[]');
+  } catch {}
+  return {
+    ...row,
+    courseCode: row.course_code,
+    courseName: row.course_name,
+    studyYear: row.study_year,
+    courseType: row.course_type,
+    electiveGroup: row.elective_group,
+    electiveRequiredCfu: row.elective_required_cfu,
+    prerequisites
+  };
+}
 
-module.exports = { db, createDatabase, SCHEMA_VERSION };
+// Supporta sia l'invocazione con db esplicito sia l'uso dell'istanza singleton
+function resolveDb(dbOrData) {
+  if (dbOrData && typeof dbOrData.prepare === 'function') {
+    return dbOrData;
+  }
+  return defaultDb;
+}
+
+function getStudentProfile(dbOrId, optionalId) {
+  const targetDb = resolveDb(dbOrId);
+  const profileId = (targetDb === dbOrId) ? optionalId : dbOrId;
+  return targetDb.prepare('SELECT * FROM StudentProfile WHERE id = ?').get(profileId) || null;
+}
+
+function upsertStudentProfile(dbOrProfile, optionalProfile) {
+  const targetDb = resolveDb(dbOrProfile);
+  const profile = (targetDb === dbOrProfile) ? optionalProfile : dbOrProfile;
+  const targetId = profile.id || profile.profileId;
+
+  targetDb.prepare(`
+    INSERT INTO StudentProfile (id, course_id, course_name, cohort_year, current_course_year, channel, surname_initial)
+    VALUES (@id, @courseId, @courseName, @cohortYear, @currentCourseYear, @channel, @surnameInitial)
+    ON CONFLICT(id) DO UPDATE SET
+      course_id = COALESCE(excluded.course_id, StudentProfile.course_id),
+      course_name = COALESCE(excluded.course_name, StudentProfile.course_name),
+      cohort_year = COALESCE(excluded.cohort_year, StudentProfile.cohort_year),
+      current_course_year = COALESCE(excluded.current_course_year, StudentProfile.current_course_year),
+      channel = COALESCE(excluded.channel, StudentProfile.channel),
+      surname_initial = COALESCE(excluded.surname_initial, StudentProfile.surname_initial),
+      updated_at = CURRENT_TIMESTAMP
+  `).run({
+    id: targetId,
+    courseId: profile.courseId || profile.anagrafica?.codiceCorso || null,
+    courseName: profile.courseName || profile.anagrafica?.corsoDiLaurea || null,
+    cohortYear: profile.cohortYear || profile.anagrafica?.annoImmatricolazione || null,
+    currentCourseYear: profile.currentCourseYear || profile.anagrafica?.annoCorso || null,
+    channel: profile.channel || null,
+    surnameInitial: profile.surnameInitial || null
+  });
+
+  return getStudentProfile(targetDb, targetId);
+}
+
+function updateStudentProfile(dbOrId, profileIdOrUpdates, optionalUpdates) {
+  const targetDb = resolveDb(dbOrId);
+  const profileId = (targetDb === dbOrId) ? profileIdOrUpdates : dbOrId;
+  const updates = (targetDb === dbOrId) ? optionalUpdates : profileIdOrUpdates;
+
+  const columns = {
+    courseId: 'course_id',
+    courseName: 'course_name',
+    cohortYear: 'cohort_year',
+    currentCourseYear: 'current_course_year',
+    channel: 'channel',
+    surnameInitial: 'surname_initial'
+  };
+  const entries = Object.entries(columns).filter(([key]) => Object.hasOwn(updates || {}, key));
+  if (entries.length === 0) return getStudentProfile(targetDb, profileId);
+
+  const assignments = entries.map(([, column]) => `${column} = @${column}`).join(', ');
+  const values = Object.fromEntries(entries.map(([key, column]) => [column, updates[key] ?? null]));
+  
+  targetDb.prepare(`UPDATE StudentProfile SET ${assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = @id`)
+    .run({ ...values, id: profileId });
+
+  return getStudentProfile(targetDb, profileId);
+}
+
+function saveStudyPlan(dbOrPlan, planOrCourses, optionalCourses) {
+  const targetDb = resolveDb(dbOrPlan);
+  const plan = (targetDb === dbOrPlan) ? planOrCourses : dbOrPlan;
+  const courses = (targetDb === dbOrPlan) ? optionalCourses : planOrCourses;
+
+  const save = targetDb.transaction(() => {
+    targetDb.prepare(`
+      INSERT INTO StudyPlans (course_id, cohort_year, course_name, version, source_name, source_url)
+      VALUES (@courseId, @cohortYear, @courseName, @version, @sourceName, @sourceUrl)
+      ON CONFLICT(course_id, cohort_year, version) DO UPDATE SET
+        course_name = excluded.course_name,
+        source_name = excluded.source_name,
+        source_url = excluded.source_url,
+        imported_at = CURRENT_TIMESTAMP
+    `).run({
+      courseId: plan.courseId,
+      cohortYear: plan.cohortYear,
+      courseName: plan.courseName,
+      version: String(plan.version || '1'),
+      sourceName: plan.sourceName || null,
+      sourceUrl: plan.sourceUrl || null
+    });
+
+    const storedPlan = targetDb.prepare(`
+      SELECT * FROM StudyPlans
+      WHERE course_id = ? AND cohort_year = ? AND version = ?
+    `).get(plan.courseId, plan.cohortYear, String(plan.version || '1'));
+
+    targetDb.prepare('DELETE FROM PlanCourses WHERE plan_id = ?').run(storedPlan.id);
+    const insertCourse = targetDb.prepare(`
+      INSERT INTO PlanCourses (
+        plan_id, course_code, course_name, normalized_name, cfu, study_year, semester,
+        course_type, elective_group, elective_required_cfu, prerequisites_json
+      ) VALUES (
+        @planId, @courseCode, @courseName, @normalizedName, @cfu, @studyYear, @semester,
+        @courseType, @electiveGroup, @electiveRequiredCfu, @prerequisitesJson
+      )
+    `);
+
+    for (const course of (courses || [])) {
+      insertCourse.run({
+        planId: storedPlan.id,
+        courseCode: course.courseCode || null,
+        courseName: course.courseName,
+        normalizedName: normalizeName(course.courseName),
+        cfu: course.cfu,
+        studyYear: course.studyYear ?? null,
+        semester: course.semester ?? null,
+        courseType: course.courseType || 'mandatory',
+        electiveGroup: course.electiveGroup || null,
+        electiveRequiredCfu: course.electiveRequiredCfu ?? null,
+        prerequisitesJson: JSON.stringify(course.prerequisites || [])
+      });
+    }
+
+    return storedPlan;
+  });
+
+  return save();
+}
+
+function getStudyPlan(dbOrCourse, courseOrCohort, optionalCohort) {
+  const targetDb = resolveDb(dbOrCourse);
+  const courseIdOrName = (targetDb === dbOrCourse) ? courseOrCohort : dbOrCourse;
+  const cohortYear = (targetDb === dbOrCourse) ? optionalCohort : courseOrCohort;
+
+  if (!courseIdOrName || !cohortYear) return null;
+
+  let plan = targetDb.prepare(`
+    SELECT * FROM StudyPlans
+    WHERE course_id = ? AND cohort_year = ?
+    ORDER BY imported_at DESC, id DESC
+    LIMIT 1
+  `).get(courseIdOrName, cohortYear);
+
+  if (plan) return plan;
+
+  const searchNormalized = normalizeName(courseIdOrName);
+  return targetDb.prepare(`
+    SELECT * FROM StudyPlans
+    WHERE LOWER(REPLACE(course_name, ' ', '')) LIKE '%' || REPLACE(?, ' ', '') || '%'
+      AND cohort_year = ?
+    ORDER BY imported_at DESC, id DESC
+    LIMIT 1
+  `).get(searchNormalized, cohortYear) || null;
+}
+
+function getPlanCourses(dbOrPlanId, optionalPlanId) {
+  const targetDb = resolveDb(dbOrPlanId);
+  const planId = (targetDb === dbOrPlanId) ? optionalPlanId : dbOrPlanId;
+
+  return targetDb.prepare(`
+    SELECT * FROM PlanCourses WHERE plan_id = ?
+    ORDER BY study_year IS NULL, study_year, semester IS NULL, semester, course_name
+  `).all(planId).map(parsePlanCourse);
+}
+
+function getSelectedElectiveIds(dbOrProfileId, optionalProfileId) {
+  const targetDb = resolveDb(dbOrProfileId);
+  const profileId = (targetDb === dbOrProfileId) ? optionalProfileId : dbOrProfileId;
+
+  return targetDb.prepare('SELECT plan_course_id FROM SelectedElectives WHERE profile_id = ?')
+    .all(profileId).map(row => row.plan_course_id);
+}
+
+function replaceSelectedElectives(dbOrProfileId, profileIdOrPlanId, planIdOrCourseIds, optionalCourseIds) {
+  const targetDb = resolveDb(dbOrProfileId);
+  const profileId = (targetDb === dbOrProfileId) ? profileIdOrPlanId : dbOrProfileId;
+  const planId = (targetDb === dbOrProfileId) ? planIdOrCourseIds : profileIdOrPlanId;
+  const courseIds = (targetDb === dbOrProfileId) ? optionalCourseIds : planIdOrCourseIds;
+
+  const uniqueIds = [...new Set(courseIds || [])];
+  if (uniqueIds.length > 0) {
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const valid = targetDb.prepare(`
+      SELECT COUNT(*) AS count FROM PlanCourses
+      WHERE plan_id = ? AND course_type = 'elective' AND id IN (${placeholders})
+    `).get(planId, ...uniqueIds).count;
+
+    if (valid !== uniqueIds.length) {
+      const error = new Error('Una o più scelte non appartengono al piano o non sono esami a scelta.');
+      error.status = 400;
+      throw error;
+    }
+  }
+
+  const replace = targetDb.transaction(() => {
+    targetDb.prepare('DELETE FROM SelectedElectives WHERE profile_id = ?').run(profileId);
+    const insert = targetDb.prepare('INSERT INTO SelectedElectives (profile_id, plan_course_id) VALUES (?, ?)');
+    for (const courseId of uniqueIds) insert.run(profileId, courseId);
+  });
+
+  replace();
+  return uniqueIds;
+}
+
+function clearSelectedElectives(dbOrProfileId, optionalProfileId) {
+  const targetDb = resolveDb(dbOrProfileId);
+  const profileId = (targetDb === dbOrProfileId) ? optionalProfileId : dbOrProfileId;
+  targetDb.prepare('DELETE FROM SelectedElectives WHERE profile_id = ?').run(profileId);
+}
+
+module.exports = {
+  normalizeName,
+  getStudentProfile,
+  upsertStudentProfile,
+  updateStudentProfile,
+  saveStudyPlan,
+  getStudyPlan,
+  getPlanCourses,
+  getSelectedElectiveIds,
+  replaceSelectedElectives,
+  clearSelectedElectives
+};

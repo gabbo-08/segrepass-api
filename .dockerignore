@@ -1,0 +1,9 @@
+﻿node_modules
+npm-debug.log
+frontend
+app.db
+app.db-wal
+app.db-shm
+*.log
+.git
+.env

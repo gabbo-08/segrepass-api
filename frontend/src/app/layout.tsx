@@ -1,19 +1,19 @@
-import type { Metadata } from "next";
-import "./globals.css";
+import type { Metadata } from 'next';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: "Segrepass 2.0",
-  description: "Dashboard Carriera Universitaria",
+  title: 'Piano di Studi',
+  description: 'Gestione carriera e piano di studi',
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html lang="it" suppressHydrationWarning>
-      <body className="min-h-full flex flex-col antialiased" suppressHydrationWarning>
+      <body suppressHydrationWarning className="bg-zinc-950 text-zinc-100">
         {children}
       </body>
     </html>

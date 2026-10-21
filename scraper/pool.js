@@ -1,88 +1,69 @@
-const puppeteer = require('puppeteer');
+const { Cluster } = require('puppeteer-cluster');
 
-let _browser = null;
-let _launchPromise = null;
-let _browserClosePromise = null;
-let _lastActivity = Date.now();
-let _activeContexts = 0;
-const IDLE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minuti di inattività
+let cluster = null;
 
-async function getBrowser() {
-  if (_browserClosePromise) await _browserClosePromise;
-  _lastActivity = Date.now();
-  if (!_browser || !_browser.connected) {
-    if (!_launchPromise) {
-      console.log('[pool] Avvio Chromium...');
-      _launchPromise = puppeteer.launch({
-        headless: true,
-        ignoreHTTPSErrors: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu'
-        ]
-      }).then(browser => {
-        _browser = browser;
-        return browser;
-      }).finally(() => { _launchPromise = null; });
-    }
-    return _launchPromise;
-  }
-  return _browser;
+async function initCluster() {
+  if (cluster) return cluster;
+
+  console.log('[Pool] Avvio inizializzazione Puppeteer Cluster...');
+  
+  cluster = await Cluster.launch({
+    // Crea una scheda in incognito (context) per ogni task, garantendo isolamento dei cookie tra utenti
+    concurrency: Cluster.CONCURRENCY_CONTEXT,
+    // Limite hardware rigoroso: massimo 3 task di scraping simultanei. Gli altri vanno in coda.
+    maxConcurrency: 3, 
+    puppeteerOptions: {
+      headless: 'new',
+      ignoreHTTPSErrors: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--ignore-certificate-errors', 
+        '--allow-insecure-localhost'
+      ]
+    },
+    // Timeout di sicurezza: se uno script si blocca su una pagina, viene terminato dopo 2 minuti
+    timeout: 120000, 
+  });
+
+  // Gestione diagnostica degli errori a livello di cluster
+  cluster.on('taskerror', (err, data, willRetry) => {
+    console.error(`[Pool Error] Fallimento task. Errore: ${err.message}`);
+  });
+
+  console.log('[Pool] Puppeteer Cluster operativo (Max Concurrency: 3)');
+  return cluster;
 }
 
-async function acquireBrowserContext(browserGetter = getBrowser) {
-  const browser = await browserGetter();
-  _activeContexts += 1;
-  _lastActivity = Date.now();
-  let context;
-  try {
-    context = await browser.createBrowserContext();
-  } catch (error) {
-    _activeContexts -= 1;
-    _lastActivity = Date.now();
-    throw error;
+/**
+ * Accoda un'operazione di scraping.
+ * @param {Object} data - I dati di input per lo scraper (es. username, password, target).
+ * @param {Function} scrapeLogic - La funzione contenente la logica di navigazione (riceve {page, data}).
+ * @returns {Promise<any>} - I dati restituiti dalla funzione scrapeLogic.
+ */
+async function queueScrapingTask(data, scrapeLogic) {
+  if (!cluster) {
+    throw new Error("Cluster non inizializzato. Impossibile accettare task.");
   }
 
-  let released = false;
-  return {
-    browser,
-    context,
-    close: async () => {
-      if (released) return;
-      released = true;
-      try {
-        await context.close();
-      } catch {}
-      finally {
-        _activeContexts = Math.max(0, _activeContexts - 1);
-        _lastActivity = Date.now();
-      }
-    }
-  };
+  // Inserisce il task nella coda e attende la risoluzione.
+  // La pagina ('page') viene generata e fornita automaticamente dal cluster.
+  return await cluster.execute(data, async ({ page, data }) => {
+    return await scrapeLogic(page, data);
+  });
 }
 
-async function closeBrowser() {
-  if (_activeContexts > 0 || _browserClosePromise) return _browserClosePromise;
-  const browser = _browser;
-  _browser = null;
-  if (browser && browser.connected) {
-    console.log('[pool] Chiusura Chromium per inattività...');
-    _browserClosePromise = browser.close().catch(() => {}).finally(() => {
-      _browserClosePromise = null;
-    });
-    await _browserClosePromise;
+// Procedura per chiudere in sicurezza la coda e il browser al riavvio del server
+async function closeCluster() {
+  if (cluster) {
+    console.log('[Pool] Chiusura del cluster in corso (attesa completamento task residui)...');
+    await cluster.idle();
+    await cluster.close();
+    cluster = null;
+    console.log('[Pool] Puppeteer Cluster disattivato in sicurezza.');
   }
 }
 
-// Timer di pulizia per liberare RAM senza interrompere scrape attivi.
-const interval = setInterval(async () => {
-  if (_browser && _browser.connected && _activeContexts === 0 && Date.now() - _lastActivity > IDLE_TIMEOUT_MS) {
-    await closeBrowser();
-  }
-}, 30000);
-
-if (interval.unref) interval.unref();
-
-module.exports = { getBrowser, acquireBrowserContext, closeBrowser };
+module.exports = { initCluster, queueScrapingTask, closeCluster };

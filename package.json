@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test",
+    "test:jest": "jest --verbose",
     "seed:plan:l8-2025-26": "node scripts/seed-study-plan-l8-2025-26.js"
   },
   "author": "Gabriele Cacace",
@@ -19,6 +19,10 @@
     "express-rate-limit": "^8.6.2",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
-    "puppeteer": "^25.8.0"
+    "puppeteer": "^25.8.0",
+    "puppeteer-cluster": "^0.25.0"
+  },
+  "devDependencies": {
+    "jest": "^30.5.2"
   }
 }

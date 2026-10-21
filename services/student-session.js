@@ -1,68 +1,95 @@
-const { createHmac } = require('node:crypto');
-const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { getDatiCarriera } = require('../scraper/segrepass');
 const { getDocentiData } = require('../scraper/docenti');
-const { calcolaMetriche } = require('../lib/metriche');
+const { buildStudentProfile } = require('./profile-extractor');
+const snapshots = require('./career-snapshots');
+const dbModule = require('../db');
 const { upsertStudentProfile } = require('../db/repository');
-const { extractStudentProfile } = require('./profile-extractor');
-const { saveCareerSnapshot } = require('./career-snapshots');
 
-function profileIdFromCode(codiceFiscale, secret = process.env.PROFILE_ID_SECRET || process.env.JWT_SECRET) {
-  if (!secret) throw new Error('JWT_SECRET deve essere configurato.');
-  return createHmac('sha256', secret)
-    .update(String(codiceFiscale).trim().toUpperCase())
-    .digest('hex');
+// Garantisce che db faccia riferimento all'istanza attiva di Database
+const db = dbModule.db || dbModule;
+
+const SESSION_DAYS = 30;
+
+const EMPTY_DOCENTI = Object.freeze({
+  subscriptions: [],
+  bookedExams: [],
+  announcements: []
+});
+
+function loadDocentiInBackground(profileId, credentials = {}) {
+  snapshots.markDocentiLoading(profileId);
+
+  getDocentiData({
+    username: credentials.username || profileId,
+    password: credentials.password
+  })
+    .then(data => snapshots.setDocentiSnapshot(profileId, data))
+    .catch(error => {
+      console.warn(`[docenti] Acquisizione per ${profileId} non riuscita: ${error.message}`);
+      snapshots.setDocentiSnapshot(profileId, {
+        available: false,
+        reason: error.code || 'DOCENTI_SCRAPE_FAILED',
+        ...EMPTY_DOCENTI
+      });
+    })
+    .finally(() => snapshots.clearDocentiLoading(profileId));
 }
 
-function hasProfileSetup(profile) {
-  return Boolean(profile?.course_id && profile?.course_name && profile?.cohort_year && profile?.current_course_year && profile?.channel);
+function listPlansForCohort(cohortYear) {
+  for (const columns of ['course_id, course_code, course_name', 'course_id, course_name']) {
+    try {
+      return db.prepare(`SELECT ${columns} FROM StudyPlans WHERE cohort_year = ?`).all(cohortYear);
+    } catch {}
+  }
+  return [];
 }
 
-async function createStudentSession({ codiceFiscale, password }, dependencies = {}) {
-  if (typeof codiceFiscale !== 'string' || !codiceFiscale.trim() || typeof password !== 'string' || !password) {
-    const error = new Error('Inserisci codice fiscale e password Segrepass.');
-    error.status = 400;
-    throw error;
+async function createStudentSession({ codiceFiscale, password } = {}) {
+  if (!codiceFiscale || !password) {
+    throw new Error('Inserisci codice fiscale e password.');
   }
 
-  const secret = dependencies.jwtSecret || process.env.JWT_SECRET;
-  if (!secret) {
-    const error = new Error('JWT_SECRET deve essere configurato.');
-    error.status = 500;
-    throw error;
-  }
+  const cfClean = String(codiceFiscale).trim().toUpperCase();
 
-  const scraper = dependencies.getDatiCarriera || getDatiCarriera;
-  const docentiScraper = dependencies.getDocentiData || getDocentiData;
-  const database = dependencies.database || require('../db').db;
-  const [careerResult, docentiResult] = await Promise.allSettled([
-    scraper({ codiceFiscale, password }),
-    docentiScraper()
-  ]);
-  if (careerResult.status === 'rejected') throw careerResult.reason;
-  const data = careerResult.value;
-  const docenti = docentiResult.status === 'fulfilled'
-    ? docentiResult.value
-    : { available: false, reason: docentiResult.reason?.code || 'DOCENTI_SCRAPE_FAILED', subscriptions: [], bookedExams: [] };
-  const metriche = calcolaMetriche(data.tabellaEsami?.records || []);
-  const profileId = profileIdFromCode(codiceFiscale, dependencies.profileSecret || secret);
-  const detectedProfile = extractStudentProfile(data);
-  const profile = upsertStudentProfile(database, { id: profileId, ...detectedProfile });
+  // 1. Scraping sincrono da Segrepass
+  const datiCarriera = await getDatiCarriera({ codiceFiscale: cfClean, password });
+  const profile = buildStudentProfile(datiCarriera);
+  const profileId = profile.codiceFiscale || cfClean;
 
-  const taxes = data.taxes || { available: false, reason: 'TAXES_DATA_NOT_AVAILABLE', paid: [], pending: [] };
-  saveCareerSnapshot(profileId, metriche.esami, { taxes, docenti });
-  const token = jwt.sign({ sub: profileId }, secret, { expiresIn: '8h' });
+  // 2. Salvataggio o aggiornamento del profilo nel DB
+  upsertStudentProfile({
+    profileId,
+    codiceFiscale: cfClean,
+    anagrafica: profile.anagrafica,
+    carriera: profile.carriera,
+    esamiSostenuti: profile.esamiSostenuti,
+    tasse: profile.tasse
+  });
+
+  // 3. Generazione Token di Sessione
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  db.prepare(`
+    INSERT INTO UserSessions (token, profile_id, expires_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(token) DO UPDATE SET expires_at = excluded.expires_at
+  `).run(sessionToken, profileId, expiresAt);
+
+  // 4. Caricamento asincrono portale Docenti
+  loadDocentiInBackground(profileId, { username: cfClean, password });
 
   return {
-    token,
-    expiresIn: '8h',
-    profile,
-    onboardingRequired: !hasProfileSetup(profile),
-    metriche,
-    taxesAvailable: taxes.available === true,
-    docentiAvailable: docenti.available === true,
-    docentiReason: docenti.available === true ? null : docenti.reason || 'DOCENTI_SCRAPE_FAILED'
+    token: sessionToken,
+    expiresAt,
+    profileId,
+    profile
   };
 }
 
-module.exports = { createStudentSession, profileIdFromCode, hasProfileSetup };
+module.exports = {
+  createStudentSession,
+  loadDocentiInBackground,
+  listPlansForCohort
+};

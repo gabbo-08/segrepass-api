@@ -1,11 +1,16 @@
-const { getBrowser, acquireBrowserContext } = require('./pool');
+﻿const axios = require('axios');
+const { queueScrapingTask } = require('./pool');
 
 const DOCENTI_LOGIN_URL = 'https://www.docenti.unina.it/login';
 const DOCENTI_ORIGIN = new URL(DOCENTI_LOGIN_URL).origin;
 const DOCENTI_SCRAPE_TIMEOUT_MS = 90 * 1000;
 const MAX_DOCENTI_PAGES = 10;
 const PAGE_NAVIGATION_TIMEOUT_MS = 15 * 1000;
-const VISIBLE_PASSWORD_SELECTOR = 'input[placeholder="Password"]:visible';
+const VISIBLE_PASSWORD_SELECTOR = 'input[placeholder="Password"]';
+
+let memoryCache = null;
+let lastFetchTime = 0;
+const CACHE_TTL_MS = 15 * 60 * 1000;
 
 function normalizeLabel(value) {
   return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -152,79 +157,98 @@ async function collectDocentiTables(page, dependencies = {}) {
     enqueue(await getLinks(page));
   }
 
-  if (queue.length) {
-    console.warn(`[docenti] Limite di ${MAX_DOCENTI_PAGES} pagine raggiunto; altre pagine pertinenti sono state saltate.`);
-  }
   return tables;
 }
 
-async function getDocentiData(dependencies = {}) {
-  const username = process.env.DOCENTI_USERNAME;
-  const password = process.env.DOCENTI_PASSWORD;
-  if (!username || !password) {
-    return { available: false, reason: 'DOCENTI_CREDENTIALS_REQUIRED', subscriptions: [], bookedExams: [] };
+async function getDocentiData(userCredentials = {}) {
+  if (memoryCache && (Date.now() - lastFetchTime < CACHE_TTL_MS)) {
+    console.log('[docenti] Dati restituiti istantaneamente dalla cache in memoria.');
+    return memoryCache;
   }
 
-  const deadline = Date.now() + DOCENTI_SCRAPE_TIMEOUT_MS;
-  let browserContext;
+  const username = userCredentials.username || process.env.DOCENTI_USERNAME;
+  const password = userCredentials.password || process.env.DOCENTI_PASSWORD;
+
+  if (!username || !password) {
+    return { available: false, reason: 'DOCENTI_CREDENTIALS_REQUIRED', subscriptions: [], bookedExams: [], announcements: [] };
+  }
+
   try {
-    const acquireContext = dependencies.acquireBrowserContext || acquireBrowserContext;
-    browserContext = await acquireContext(dependencies.getBrowser || getBrowser);
-    const { context } = browserContext;
-    const page = await context.newPage();
+    return await queueScrapingTask({ username, password }, async (page, data) => {
+      const deadline = Date.now() + DOCENTI_SCRAPE_TIMEOUT_MS;
 
-    await page.goto(DOCENTI_LOGIN_URL, {
-      waitUntil: 'networkidle2',
-      timeout: timeoutFor(deadline, 30000)
+      const avvisiPromise = axios.get('https://www.docenti.unina.it/unina-api/v1/avvisi/ultimo-mese', {
+        timeout: 6000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      }).then(res => res.data).catch(() => []);
+
+      await page.goto(DOCENTI_LOGIN_URL, {
+        waitUntil: 'networkidle2',
+        timeout: timeoutFor(deadline, 30000)
+      });
+
+      const studenteTab = await page.evaluateHandle(() => Array.from(document.querySelectorAll('*')).find(e => e.children.length === 0 && (e.textContent || '').trim().toLowerCase() === 'studente'));
+      if (studenteTab.asElement()) await studenteTab.asElement().click();
+      await new Promise(r => setTimeout(r, 800));
+
+      await page.waitForSelector('input[placeholder="Username"]', {
+        visible: true,
+        timeout: timeoutFor(deadline, 10000)
+      });
+
+      await page.type('input[placeholder="Username"]', data.username, { delay: 15 });
+      await page.type(VISIBLE_PASSWORD_SELECTOR, data.password, { delay: 15 });
+
+      const navigation = page.waitForNavigation({
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutFor(deadline, 20000)
+      }).catch(() => null);
+
+      const loginFormHidden = page.waitForFunction(() => {
+        const field = document.querySelector('input[placeholder="Password"]');
+        return !field || field.getClientRects().length === 0;
+      }, { timeout: timeoutFor(deadline, 20000) }).catch(() => null);
+
+      const [loginResponse] = await Promise.all([
+        Promise.race([navigation, loginFormHidden]),
+        page.keyboard.press('Enter')
+      ]);
+
+      if (loginResponse && loginResponse.status() >= 400) {
+        const error = new Error(`Login Docenti Unina fallito (HTTP ${loginResponse.status()}).`);
+        error.code = 'DOCENTI_AUTH_FAILED';
+        throw error;
+      }
+
+      if (await page.$(VISIBLE_PASSWORD_SELECTOR)) {
+        const error = new Error('Credenziali Docenti Unina non valide.');
+        error.code = 'DOCENTI_AUTH_FAILED';
+        throw error;
+      }
+
+      const [tables, announcementsData] = await Promise.all([
+        collectDocentiTables(page),
+        avvisiPromise
+      ]);
+
+      const parsedTables = normalizeDocentiTables(tables);
+      const available = parsedTables.subscriptions.length > 0 || parsedTables.bookedExams.length > 0 || announcementsData.length > 0;
+
+      memoryCache = {
+        available,
+        reason: available ? null : 'DOCENTI_DATA_NOT_FOUND',
+        retrievedAt: new Date().toISOString(),
+        announcements: announcementsData,
+        ...parsedTables
+      };
+
+      lastFetchTime = Date.now();
+      return memoryCache;
     });
-    await page.evaluate(() => Array.from(document.querySelectorAll('button,a,[role="tab"]'))
-      .find(element => (element.innerText || '').trim().toUpperCase() === 'STUDENTE')?.click());
-    await page.waitForSelector('input[placeholder="Username"]:visible', {
-      visible: true,
-      timeout: timeoutFor(deadline, 10000)
-    });
-    await page.type('input[placeholder="Username"]:visible', username, { delay: 15 });
-    await page.type(VISIBLE_PASSWORD_SELECTOR, password, { delay: 15 });
-
-    const navigation = page.waitForNavigation({
-      waitUntil: 'domcontentloaded',
-      timeout: timeoutFor(deadline, 20000)
-    }).catch(() => null);
-    const loginFormHidden = page.waitForFunction(() => {
-      const field = document.querySelector('input[placeholder="Password"]');
-      return !field || field.getClientRects().length === 0;
-    }, { timeout: timeoutFor(deadline, 20000) }).catch(() => null);
-    const [loginResponse] = await Promise.all([
-      Promise.race([navigation, loginFormHidden]),
-      page.click('input[type="submit"]:visible')
-    ]);
-
-    if (loginResponse && loginResponse.status() >= 400) {
-      const error = new Error(`Login Docenti Unina fallito (HTTP ${loginResponse.status()}).`);
-      error.code = 'DOCENTI_AUTH_FAILED';
-      throw error;
-    }
-    if (await page.$(VISIBLE_PASSWORD_SELECTOR)) {
-      const error = new Error('Credenziali Docenti Unina non valide.');
-      error.code = 'DOCENTI_AUTH_FAILED';
-      throw error;
-    }
-
-    const tables = await collectDocentiTables(page, {
-      extractTables: dependencies.extractTables,
-      getLinks: dependencies.getLinks,
-      deadline
-    });
-    const parsed = normalizeDocentiTables(tables);
-    const available = parsed.subscriptions.length > 0 || parsed.bookedExams.length > 0;
-    return {
-      available,
-      reason: available ? null : 'DOCENTI_DATA_NOT_FOUND',
-      retrievedAt: new Date().toISOString(),
-      ...parsed
-    };
-  } finally {
-    await browserContext?.close();
+  } catch (err) {
+    console.warn('[docenti] Errore durante lo scraping, tentativo di fallback su cache:', err.message);
+    if (memoryCache) return memoryCache;
+    throw err;
   }
 }
 
